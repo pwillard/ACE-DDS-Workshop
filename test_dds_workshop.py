@@ -44,6 +44,10 @@ class DDSWorkshopHelperTests(unittest.TestCase):
         self.assertTrue(Path(dw.resolve_tool("", ("ace2png.exe",))).name.lower().startswith("ace2png"))
         self.assertTrue(Path(dw.resolve_tool("", ("png2dds.exe",))).name.lower().startswith("png2dds"))
         self.assertTrue(Path(dw.resolve_magick("")).name.lower().startswith("magick"))
+        with tempfile.TemporaryDirectory() as td:
+            stale = Path(td) / "png2dds.exe"
+            stale.write_text("stale")
+            self.assertEqual(Path(dw.resolve_tool(str(stale), ("png2dds.exe",))).resolve(), (Path(dw.app_dir()) / "png2dds.exe").resolve())
 
     def test_tool_environment_prepends_magick_folder(self):
         with tempfile.TemporaryDirectory() as td:
@@ -52,6 +56,33 @@ class DDSWorkshopHelperTests(unittest.TestCase):
             env = dw.tool_environment(str(magick))
             self.assertEqual(env["PATH"].split(dw.os.pathsep)[0], str(Path(td)))
             self.assertEqual(env["MAGICK_HOME"], str(Path(td)))
+
+    def test_command_available_and_missing_support_files(self):
+        self.assertFalse(dw.command_available(str(Path("definitely_missing_support_file.exe"))))
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = dw.DDSWorkshopApp(root)
+            app.mode.set("ace_dds")
+            app.ace2png_cmd.set(str(Path("missing_ace2png.exe")))
+            app.png2dds_cmd.set(str(Path("missing_png2dds.exe")))
+            app.magick_cmd.set(str(Path("missing_magick.exe")))
+            missing = app.missing_support_files()
+            self.assertGreaterEqual(len(missing), 3)
+            self.assertTrue(any("ace2png.exe" in item for item in missing))
+            self.assertTrue(any("png2dds.exe" in item for item in missing))
+            self.assertTrue(any("ImageMagick" in item for item in missing))
+        finally:
+            root.destroy()
+
+    def test_subprocess_window_options_hide_windows_console(self):
+        opts = dw.subprocess_window_options()
+        if dw.os.name == "nt":
+            self.assertIn("creationflags", opts)
+            self.assertEqual(opts["creationflags"], dw.subprocess.CREATE_NO_WINDOW)
+            self.assertIn("startupinfo", opts)
+        else:
+            self.assertEqual(opts, {})
 
     def test_asset_paths_exist(self):
         self.assertTrue(dw.app_icon_path().exists())

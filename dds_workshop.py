@@ -19,7 +19,7 @@ import tkinter.font as tkfont
 from tkinter.scrolledtext import ScrolledText
 
 APP_NAME = "DDS Workshop"
-APP_VERSION = "0.1.6"
+APP_VERSION = "0.1.9"
 APP_SUBTITLE = "ACE / DDS TEXTURE CONVERSION"
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / "DDSWorkshop"
 CONFIG_FILE = CONFIG_DIR / "settings.ini"
@@ -115,9 +115,14 @@ def banner_image_path() -> Path:
 
 
 def resolve_tool(saved: str, names: tuple[str, ...]) -> str:
+    for base in (app_dir(),):
+        for name in names:
+            candidate = base / name
+            if candidate.exists():
+                return str(candidate)
     if saved and Path(saved).exists():
         return saved
-    for base in (app_dir(), Path.cwd()):
+    for base in (Path.cwd(),):
         for name in names:
             candidate = base / name
             if candidate.exists():
@@ -130,14 +135,28 @@ def resolve_tool(saved: str, names: tuple[str, ...]) -> str:
 
 
 def resolve_magick(saved: str) -> str:
+    for base in (app_dir(),):
+        for relative in (Path("ImageMagick") / "magick.exe", Path("magick.exe"), Path("magick")):
+            candidate = base / relative
+            if candidate.exists():
+                return str(candidate)
     if saved and Path(saved).exists():
         return saved
-    for base in (app_dir(), bundled_dir(), Path.cwd()):
+    for base in (bundled_dir(), Path.cwd()):
         for relative in (Path("ImageMagick") / "magick.exe", Path("magick.exe"), Path("magick")):
             candidate = base / relative
             if candidate.exists():
                 return str(candidate)
     return shutil.which("magick.exe") or shutil.which("magick") or str(app_dir() / "ImageMagick" / "magick.exe")
+
+
+def command_available(command: str) -> bool:
+    if not command:
+        return False
+    path = Path(command)
+    if path.exists():
+        return True
+    return shutil.which(command) is not None
 
 
 def tool_environment(magick_cmd: str) -> dict[str, str]:
@@ -221,9 +240,30 @@ def ensure_overwrite_policy(path: Path, policy: str) -> tuple[bool, str]:
     return False, f"SKIP unknown overwrite policy for: {path}"
 
 
+def subprocess_window_options() -> dict[str, object]:
+    if os.name != "nt":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    return {"startupinfo": startupinfo, "creationflags": subprocess.CREATE_NO_WINDOW}
+
+
 def run_command(cmd: list[str], cwd: Path, log, env: dict[str, str] | None = None) -> int:
     log("$ " + " ".join(f'"{x}"' if " " in x else x for x in cmd))
-    proc = subprocess.Popen(cmd, cwd=str(cwd), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(cwd),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            **subprocess_window_options(),
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"Required external program not found: {cmd[0]}") from exc
     assert proc.stdout is not None
     for line in proc.stdout:
         log(line.rstrip())
@@ -587,6 +627,35 @@ class DDSWorkshopApp:
         self.abort_button.configure(state="normal" if running else "disabled")
         self.status_label.configure(text="RUNNING" if running else "READY")
 
+    def missing_support_files(self) -> list[str]:
+        mode = self.mode.get()
+        required: list[tuple[str, str]] = []
+        if mode in {"ace_png", "ace_dds"}:
+            required.append(("Bundled ace2png.exe", str(app_dir() / "ace2png.exe")))
+            required.append(("ace2png.exe", self.ace2png_cmd.get()))
+        if mode in {"image_dds", "ace_dds"}:
+            required.append(("Bundled png2dds.exe", str(app_dir() / "png2dds.exe")))
+            required.append(("Bundled ImageMagick magick.exe", str(app_dir() / "ImageMagick" / "magick.exe")))
+            required.append(("png2dds.exe", self.png2dds_cmd.get()))
+            required.append(("ImageMagick magick.exe", self.magick_cmd.get()))
+        missing = []
+        seen: set[str] = set()
+        for label, command in required:
+            line = f"{label}: {command or '(not configured)'}"
+            if line not in seen and not command_available(command):
+                missing.append(line)
+                seen.add(line)
+        return missing
+
+    def log_support_paths(self) -> None:
+        mode = self.mode.get()
+        self.thread_log("Support files:")
+        if mode in {"ace_png", "ace_dds"}:
+            self.thread_log(f"  ace2png    : {self.ace2png_cmd.get()}")
+        if mode in {"image_dds", "ace_dds"}:
+            self.thread_log(f"  png2dds    : {self.png2dds_cmd.get()}")
+            self.thread_log(f"  ImageMagick: {self.magick_cmd.get()}")
+
     def start_run(self) -> None:
         if self.worker and self.worker.is_alive():
             return
@@ -594,6 +663,12 @@ class DDSWorkshopApp:
         source = Path(self.source_path.get())
         if not source.exists():
             messagebox.showerror(APP_NAME, "Source file or folder does not exist.", parent=self.root)
+            return
+        missing = self.missing_support_files()
+        if missing:
+            message = "DDS Workshop cannot run because required support files are missing:\n\n" + "\n".join(missing) + "\n\nUse Settings to point DDS Workshop at the missing executable, or restore the files beside DDSWorkshop.exe."
+            self.append_log(message)
+            messagebox.showerror(APP_NAME, message, parent=self.root)
             return
         self.abort_requested = False
         self.set_running(True)
@@ -616,6 +691,7 @@ class DDSWorkshopApp:
                 output_root.mkdir(parents=True, exist_ok=True)
             files = collect_sources(source, mode, self.recursive.get())
             self.thread_log(f"DDS Workshop {APP_VERSION}")
+            self.log_support_paths()
             self.thread_log(f"Found {len(files)} file(s).")
             for index, file_path in enumerate(files, start=1):
                 if self.abort_requested:
