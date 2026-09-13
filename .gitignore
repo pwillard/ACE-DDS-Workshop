@@ -15,4 +15,5 @@ third_party/extract/
 # Local editor/OS files
 .DS_Store
 Thumbs.db
+
 state.txt
